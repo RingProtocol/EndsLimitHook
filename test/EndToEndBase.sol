@@ -22,7 +22,7 @@ import {BaseHook} from "../src/base/BaseHook.sol";
 import {BandTicks} from "../src/libraries/BandTicks.sol";
 
 contract EndsLimitHookHarness is EndsLimitHook {
-    constructor(IPoolManager m, uint16 edge) EndsLimitHook(m, edge) {}
+    constructor(IPoolManager m, address owner_) EndsLimitHook(m, owner_) {}
 
     function validateHookAddress(BaseHook) internal pure override {}
 }
@@ -46,6 +46,8 @@ abstract contract EndToEndBase is Test {
     EndsLimitHook internal hook;
     PoolKey internal endsKey;
 
+    uint256 internal pLowHuman;
+    uint256 internal pHighHuman;
     int24 internal rangeLower;
     int24 internal rangeUpper;
     int24 internal buyLower;
@@ -54,6 +56,9 @@ abstract contract EndToEndBase is Test {
     int24 internal sellUpper;
 
     function _setUpPool(uint256 pLow, uint256 pInit, uint256 pHigh) internal {
+        pLowHuman = pLow;
+        pHighHuman = pHigh;
+
         manager = new PoolManager(address(this));
         swapRouter = new PoolSwapTest(manager);
         modifyLiquidityRouter = new PoolModifyLiquidityTest(manager);
@@ -70,7 +75,7 @@ abstract contract EndToEndBase is Test {
         b.approve(address(modifyLiquidityRouter), type(uint256).max);
 
         address hookAddr = address(HOOK_FLAGS);
-        deployCodeTo("EndToEndBase.sol:EndsLimitHookHarness", abi.encode(manager, EDGE_BPS), hookAddr);
+        deployCodeTo("EndToEndBase.sol:EndsLimitHookHarness", abi.encode(manager, address(this)), hookAddr);
         hook = EndsLimitHook(hookAddr);
 
         rangeLower = BandTicks.floorToSpacing(BandTicks.tickFromHuman(pLow), SPACING);
@@ -85,10 +90,11 @@ abstract contract EndToEndBase is Test {
             tickSpacing: SPACING,
             hooks: IHooks(hookAddr)
         });
+        // Anyone may initialize; first caller sets price.
         manager.initialize(endsKey, BandTicks.sqrtPriceFromHuman(pInit));
+        hook.configureRange(endsKey, pLow, pHigh, EDGE_BPS);
     }
 
-    /// @dev First add records range [pLow,pHigh] ticks and places user LP across that range.
     function _addUserRange(uint128 liquidity) internal {
         modifyLiquidityRouter.modifyLiquidity(
             endsKey,

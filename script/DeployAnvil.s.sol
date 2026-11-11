@@ -21,12 +21,12 @@ import {HookMiner} from "../src/utils/HookMiner.sol";
 import {BaseHook} from "../src/base/BaseHook.sol";
 
 contract EndsLimitHookAnvil is EndsLimitHook {
-    constructor(IPoolManager m, uint16 edge) EndsLimitHook(m, edge) {}
+    constructor(IPoolManager m, address o) EndsLimitHook(m, o) {}
 
     function validateHookAddress(BaseHook) internal pure override {}
 }
 
-/// @notice Deploy PoolManager + EndsLimitHook; first user addLiquidity records range 2500–3500.
+/// @notice Deploy PoolManager + EndsLimitHook; admin configureRange then sample user LP.
 contract DeployAnvil is Script {
     using PoolIdLibrary for PoolKey;
 
@@ -42,9 +42,9 @@ contract DeployAnvil is Script {
         PoolManager manager = new PoolManager(deployer);
         address create2Deployer = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
         (address hookAddr, bytes32 salt) = HookMiner.find(
-            create2Deployer, FLAGS, type(EndsLimitHookAnvil).creationCode, abi.encode(address(manager), EDGE_BPS)
+            create2Deployer, FLAGS, type(EndsLimitHookAnvil).creationCode, abi.encode(address(manager), deployer)
         );
-        EndsLimitHookAnvil hook = new EndsLimitHookAnvil{salt: salt}(IPoolManager(address(manager)), EDGE_BPS);
+        EndsLimitHookAnvil hook = new EndsLimitHookAnvil{salt: salt}(IPoolManager(address(manager)), deployer);
         require(address(hook) == hookAddr, "hook salt");
 
         MockERC20 a = new MockERC20("ETH", "ETH", 18);
@@ -61,9 +61,12 @@ contract DeployAnvil is Script {
             currency0: c0, currency1: c1, fee: 3000, tickSpacing: SPACING, hooks: IHooks(hookAddr)
         });
         manager.initialize(key, BandTicks.sqrtPriceFromHuman(3000));
+        hook.configureRange(key, 2500, 3500, EDGE_BPS);
 
-        int24 rangeLower = BandTicks.floorToSpacing(BandTicks.tickFromHuman(2500), SPACING);
-        int24 rangeUpper = BandTicks.floorToSpacing(BandTicks.tickFromHuman(3500), SPACING);
+        (int24 rangeLower, int24 rangeUpper,,,, int24 sellLower, int24 sellUpper, bool configured) =
+            hook.bands(key.toId());
+        require(configured, "range not configured");
+
         uint128 liquidity = BandTicks.liquidityForAmount0(
             TickMath.getSqrtPriceAtTick(rangeLower), TickMath.getSqrtPriceAtTick(rangeUpper), 5 ether
         );
@@ -75,17 +78,13 @@ contract DeployAnvil is Script {
             ""
         );
 
-        (,,, int24 bl, int24 bu, int24 sl, int24 su, bool configured) = hook.bands(key.toId());
-        require(configured, "range not recorded");
-
         vm.stopBroadcast();
 
         console2.log("PoolManager", address(manager));
         console2.log("EndsLimitHook", hookAddr);
-        console2.log("ModifyLiquidityRouter", address(liq));
-        console2.log("buyLower", int256(bl));
-        console2.log("buyUpper", int256(bu));
-        console2.log("sellLower", int256(sl));
-        console2.log("sellUpper", int256(su));
+        console2.log("rangeLower", int256(rangeLower));
+        console2.log("rangeUpper", int256(rangeUpper));
+        console2.log("sellLower", int256(sellLower));
+        console2.log("sellUpper", int256(sellUpper));
     }
 }

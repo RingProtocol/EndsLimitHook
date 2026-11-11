@@ -8,6 +8,9 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 /// @notice Range → end-band tick helpers for EndsLimitHook.
 /// @dev Human price = token1/token0 (both tokens same decimals).
 library BandTicks {
+    uint16 internal constant MAX_EDGE_BPS = 200; // 2%
+    uint16 internal constant MIN_RANGE_BPS = 500; // 5% width: pHigh/pLow >= 1.05
+
     error BadSpacing();
     error BadWidth();
     error BandOrder();
@@ -40,36 +43,43 @@ library BandTicks {
         return compressed * spacing;
     }
 
+    /// @notice Require `pHigh/pLow >= 1 + MIN_RANGE_BPS/10000` (5%).
+    function assertMinWidth(uint256 pLow, uint256 pHigh) internal pure {
+        if (pLow == 0 || pHigh <= pLow) revert BadRange();
+        if (pHigh * 10_000 < pLow * (10_000 + MIN_RANGE_BPS)) revert BadWidth();
+    }
+
+    function assertEdge(uint16 edgeBps) internal pure {
+        if (edgeBps == 0 || edgeBps > MAX_EDGE_BPS) revert BadEdge();
+    }
+
     /// @notice Derive buy/sell bands from user range `[pLow, pHigh]` and `edgeBps`.
-    /// Buy:  `[pLow*(1-edge), pLow]`  e.g. 2450–2500 when pLow=2500, edge=2%.
-    /// Sell: `[pHigh*(1-edge), pHigh]` e.g. 3430–3500 when pHigh=3500, edge=2%.
     function bandsFromRange(uint256 pLow, uint256 pHigh, uint16 edgeBps, int24 spacing)
         internal
         pure
         returns (int24 buyLower, int24 buyUpper, int24 sellLower, int24 sellUpper)
     {
-        if (pHigh <= pLow) revert BadRange();
-        if (edgeBps == 0 || edgeBps >= 5000) revert BadEdge(); // (0, 50%)
+        assertMinWidth(pLow, pHigh);
+        assertEdge(edgeBps);
 
         buyUpper = floorToSpacing(tickFromHuman(pLow), spacing);
         sellUpper = floorToSpacing(tickFromHuman(pHigh), spacing);
         return bandsFromTicks(buyUpper, sellUpper, edgeBps, spacing);
     }
 
-    /// @notice Derive end thresholds from an already-chosen tick range (no tick↔price round-trip on bounds).
-    /// `buyUpper = rangeLower`, `sellUpper = rangeUpper`; edge only moves the inner thresholds.
+    /// @notice Derive end thresholds from tick range. `buyUpper = rangeLower`, `sellUpper = rangeUpper`.
     function bandsFromTicks(int24 rangeLower, int24 rangeUpper, uint16 edgeBps, int24 spacing)
         internal
         pure
         returns (int24 buyLower, int24 buyUpper, int24 sellLower, int24 sellUpper)
     {
         if (rangeLower >= rangeUpper) revert BadRange();
-        if (edgeBps == 0 || edgeBps >= 5000) revert BadEdge();
+        assertEdge(edgeBps);
 
         uint256 pLow = humanFromTick(rangeLower);
         uint256 pHigh = humanFromTick(rangeUpper);
         if (pLow == 0) pLow = 1;
-        if (pHigh <= pLow) revert BadRange();
+        assertMinWidth(pLow, pHigh);
 
         uint256 buyPriceLow = (pLow * (10_000 - edgeBps)) / 10_000;
         if (buyPriceLow == 0) buyPriceLow = 1;

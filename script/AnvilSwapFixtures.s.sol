@@ -22,12 +22,12 @@ import {BaseHook} from "../src/base/BaseHook.sol";
 import {SwapCaller} from "../src/test/SwapCaller.sol";
 
 contract EndsLimitHookFix is EndsLimitHook {
-    constructor(IPoolManager m, uint16 edge) EndsLimitHook(m, edge) {}
+    constructor(IPoolManager m, address o) EndsLimitHook(m, o) {}
 
     function validateHookAddress(BaseHook) internal pure override {}
 }
 
-/// @notice Deploy mid / sell-zone / buy-zone / above-range fixtures; range recorded on first addLiquidity.
+/// @notice Deploy mid / sell-zone / buy-zone fixtures; admin configureRange then locked user LP.
 contract AnvilSwapFixtures is Script {
     uint160 constant FLAGS = uint160(Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG);
     uint16 constant EDGE_BPS = 200;
@@ -45,10 +45,9 @@ contract AnvilSwapFixtures is Script {
         b.mint(owner, type(uint128).max);
         (Currency c0, Currency c1) = SortTokens.sort(a, b);
 
-        _one("mid", owner, c0, c1, a, b, 3000, false);
-        _one("sell", owner, c0, c1, a, b, 3450, false);
-        _one("buy", owner, c0, c1, a, b, 2470, true);
-        _one("above", owner, c0, c1, a, b, 3600, false);
+        _one("mid", owner, c0, c1, a, b, 3000);
+        _one("sell", owner, c0, c1, a, b, 3450);
+        _one("buy", owner, c0, c1, a, b, 2470);
 
         vm.stopBroadcast();
     }
@@ -60,14 +59,13 @@ contract AnvilSwapFixtures is Script {
         Currency c1,
         MockERC20 a,
         MockERC20 b,
-        uint256 pInit,
-        bool extraBuyBand
+        uint256 pInit
     ) internal {
         PoolManager manager = new PoolManager(owner);
         (address hookAddr, bytes32 salt) = HookMiner.find(
-            CREATE2, FLAGS, type(EndsLimitHookFix).creationCode, abi.encode(address(manager), EDGE_BPS)
+            CREATE2, FLAGS, type(EndsLimitHookFix).creationCode, abi.encode(address(manager), owner)
         );
-        EndsLimitHookFix hook = new EndsLimitHookFix{salt: salt}(IPoolManager(address(manager)), EDGE_BPS);
+        EndsLimitHookFix hook = new EndsLimitHookFix{salt: salt}(IPoolManager(address(manager)), owner);
         require(address(hook) == hookAddr, "hook salt");
 
         PoolModifyLiquidityTest liq = new PoolModifyLiquidityTest(IPoolManager(address(manager)));
@@ -83,11 +81,9 @@ contract AnvilSwapFixtures is Script {
             currency0: c0, currency1: c1, fee: 3000, tickSpacing: SPACING, hooks: IHooks(hookAddr)
         });
         manager.initialize(key, BandTicks.sqrtPriceFromHuman(pInit));
+        hook.configureRange(key, 2500, 3500, EDGE_BPS);
 
-        int24 rangeLower = BandTicks.floorToSpacing(BandTicks.tickFromHuman(2500), SPACING);
-        int24 rangeUpper = BandTicks.floorToSpacing(BandTicks.tickFromHuman(3500), SPACING);
-        (int24 bl, int24 bu, int24 sl, int24 su) =
-            BandTicks.bandsFromTicks(rangeLower, rangeUpper, EDGE_BPS, SPACING);
+        (int24 rangeLower, int24 rangeUpper,,,, int24 sl, int24 su,) = hook.bands(key.toId());
 
         uint128 liquidity = BandTicks.liquidityForAmount0(
             TickMath.getSqrtPriceAtTick(rangeLower), TickMath.getSqrtPriceAtTick(rangeUpper), 5 ether
@@ -100,45 +96,16 @@ contract AnvilSwapFixtures is Script {
             ""
         );
 
-        if (extraBuyBand) {
-            uint128 buyLiq = BandTicks.liquidityForAmount1(
-                TickMath.getSqrtPriceAtTick(bl), TickMath.getSqrtPriceAtTick(bu), 10_000 ether
-            );
-            liq.modifyLiquidity(
-                key,
-                ModifyLiquidityParams({
-                    tickLower: bl, tickUpper: bu, liquidityDelta: int256(uint256(buyLiq)), salt: bytes32("BUY")
-                }),
-                ""
-            );
-        }
-
-        if (pInit >= 3600) {
-            int24 hi = BandTicks.floorToSpacing(BandTicks.tickFromHuman(4200), SPACING);
-            uint128 hiLiq = BandTicks.liquidityForAmount0(
-                TickMath.getSqrtPriceAtTick(rangeUpper), TickMath.getSqrtPriceAtTick(hi), 2 ether
-            );
-            liq.modifyLiquidity(
-                key,
-                ModifyLiquidityParams({
-                    tickLower: rangeUpper, tickUpper: hi, liquidityDelta: int256(uint256(hiLiq)), salt: bytes32("HI")
-                }),
-                ""
-            );
-            console2.log(string.concat("FIX_", label, "_hiLim"), uint256(TickMath.getSqrtPriceAtTick(hi)) + 1);
-        }
-
         console2.log(string.concat("FIX_", label, "_manager"), address(manager));
         console2.log(string.concat("FIX_", label, "_hook"), hookAddr);
         console2.log(string.concat("FIX_", label, "_router"), address(swapRouter));
         console2.log(string.concat("FIX_", label, "_caller"), address(caller));
         console2.log(string.concat("FIX_", label, "_c0"), Currency.unwrap(c0));
         console2.log(string.concat("FIX_", label, "_c1"), Currency.unwrap(c1));
-        console2.log(string.concat("FIX_", label, "_buyLower"), int256(bl));
-        console2.log(string.concat("FIX_", label, "_buyUpper"), int256(bu));
         console2.log(string.concat("FIX_", label, "_sellLower"), int256(sl));
         console2.log(string.concat("FIX_", label, "_sellUpper"), int256(su));
         console2.log(string.concat("FIX_", label, "_sellLim"), uint256(TickMath.getSqrtPriceAtTick(su)) + 1);
-        console2.log(string.concat("FIX_", label, "_buyLim"), uint256(TickMath.getSqrtPriceAtTick(bl)));
+        console2.log(string.concat("FIX_", label, "_buyLim"), uint256(TickMath.getSqrtPriceAtTick(rangeLower)));
+        console2.log(string.concat("FIX_", label, "_buyLower"), int256(rangeLower));
     }
 }

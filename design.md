@@ -4,7 +4,7 @@
 > 产品名：`RingLowSellHighBuy`；合约名：`GridVault`（多档远期）/ `EndsLimitHook`（range + edge 两端门控）
 > 适用范围：Uniswap v4 现货池，ETH/USDC 类双边资产
 > 一句话：用户首次加仓定 range；中间 beforeSwap 拒单；低于 buyUpper / 不低于 sellLower（含冲破上沿）按方向放行；hook 不代挂仓。
-> 算例：`node RingLowHigher/calc.mjs`（网格收益算例；门控版经济路径见 report）
+> 算例：`node calc.mjs`（EndsLimitHook 工程内；网格收益算例；门控版经济路径见 report）
 > 玩法图：`docs/liquidity-play.md`
 >
 > **纠偏**：仅「中间空、两端有仓」的几何在 v3/v4 上可不靠 hook 手工挂出，但本产品要的是选 hook + 配 range 后的自动门控与方向约束，不是用户手动拆单挂撤。

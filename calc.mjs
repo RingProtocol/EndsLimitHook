@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * RingLowHigher 设计文档的算例计算器（可复算，不靠手算）。
+ * EndsLimitHook 设计文档的算例计算器（可复算，不靠手算）。
  *
  * 场景：100 万美元，50 万放 v4 LP [P_low, P_high]，50 万放 GridVault 同区间。
  *
@@ -11,7 +11,7 @@
  *   - 容量闭合：mid 上持 e0 = K*q 的 ETH、c0 = q*sum(buyLevels) 的现金
  *     ⇒ P_high 处 ETH 清零（到顶全卖）；P_low 处现金清零、ETH = 2*e0（到底买满）
  *
- * 用法：node RingLowHigher/calc.mjs
+ * 用法：node calc.mjs（在 EndsLimitHook 工程目录）
  */
 
 const P_LOW = 2500;

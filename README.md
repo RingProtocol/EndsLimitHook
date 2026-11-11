@@ -1,40 +1,22 @@
-# RingLowHigher — EndsLimitHook
+# EndsLimitHook
 
-Uniswap v4 hook：用户**第一次 `addLiquidity`** 的 tick range 即策略区间（如 2500–3500）；hook **不代挂仓**。`beforeSwap` 在中间拒单，两端开门外放行（含价格冲破上沿，如 4000）。
+Uniswap v4 hook：每个池（如 ETH/USDT）由**管理员配置一套锁定 range**；用户只能按该 range 加仓；中间 `beforeSwap` 拒单，两端开门外按方向放行。
 
-玩法图：[docs/liquidity-play.md](docs/liquidity-play.md)  
-设计稿（多档网格远期）：[design.md](design.md)  
-验证报告：[report-anvil-k1.md](report-anvil-k1.md)
+设计稿：[docs/specs/2026-11-11-admin-range-design.md](docs/specs/2026-11-11-admin-range-design.md)  
+玩法图：[docs/liquidity-play.md](docs/liquidity-play.md)
 
-## 机制（当前实现）
+## 机制
 
-1. 构造时固定 `edgeBps`（如 200 = 2%）
-2. 首次 `beforeAddLiquidity` → 记录 `tickLower/tickUpper`，推导 `buyUpper=rangeLower`、`sellLower≈pHigh×(1-edge)`
-3. 之后用户自己加仓；hook 不再 `modifyLiquidity`
-4. `beforeSwap`：
-   - `tick < buyUpper`：只允许卖 ETH 进池（`zeroForOne=true`）
-   - `tick >= sellLower`：只允许买 ETH 出池（开区间向上）
-   - 中间 → `SwapNotSupported`
-
-已移除：`configureRange` / `placeBuy` / `placeSell`。
-
-## 依赖
-
-```bash
-bash scripts/install-libs.sh
-```
+1. 管理员 `configureRange(pLow, pHigh, edgeBps)`（每池一次）
+   - `edgeBps ∈ (0, 200]`（≤2%）
+   - 宽度 ≥5%：`pHigh * 10000 >= pLow * 10500`
+2. 池 `initialize` 不限制；第一个调用者定初始价
+3. 任何人 `addLiquidity`，但 ticks 必须等于锁定 range
+4. 任何人 `swap`；中间 `SwapNotSupported`；低端只许卖资产进、高端只许买资产出（含冲破上沿）
 
 ## 测试
 
 ```bash
+bash scripts/install-libs.sh
 forge test -vv
 ```
-
-## 布局
-
-| 路径 | 作用 |
-|---|---|
-| `src/EndsLimitHook.sol` | 记 range + beforeSwap 门控 |
-| `src/libraries/BandTicks.sol` | range → bands / 流动性计算 |
-| `test/EndsLimit.t.sol` | 记 range、中间拒单、方向门、开门外卖 |
-| `test/ComparePaths.t.sol` | 中间 unsupported vs 满区间平滑卖 |
