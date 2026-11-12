@@ -27,16 +27,16 @@ contract EndsLimitHookHarness is EndsLimitHook {
     function validateHookAddress(BaseHook) internal pure override {}
 }
 
-/// @dev Thin fixture — avoids inheriting v4-core Deployers (stack-too-deep with this hook).
 abstract contract EndToEndBase is Test {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
     using CurrencyLibrary for Currency;
 
-    uint160 internal constant HOOK_FLAGS =
-        uint160(Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG);
+    uint160 internal constant HOOK_FLAGS = uint160(
+        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+    );
     int24 internal constant SPACING = 60;
-    uint16 internal constant EDGE_BPS = 200; // 2%
+    uint16 internal constant EDGE_BPS = 200;
 
     IPoolManager internal manager;
     PoolModifyLiquidityTest internal modifyLiquidityRouter;
@@ -48,14 +48,13 @@ abstract contract EndToEndBase is Test {
 
     uint256 internal pLowHuman;
     uint256 internal pHighHuman;
-    int24 internal rangeLower;
-    int24 internal rangeUpper;
+    uint160 internal initSqrt;
     int24 internal buyLower;
     int24 internal buyUpper;
     int24 internal sellLower;
     int24 internal sellUpper;
 
-    function _setUpPool(uint256 pLow, uint256 pInit, uint256 pHigh) internal {
+    function _setUpPool(uint256 pLow, uint256 pHigh) internal {
         pLowHuman = pLow;
         pHighHuman = pHigh;
 
@@ -78,10 +77,8 @@ abstract contract EndToEndBase is Test {
         deployCodeTo("EndToEndBase.sol:EndsLimitHookHarness", abi.encode(manager, address(this)), hookAddr);
         hook = EndsLimitHook(hookAddr);
 
-        rangeLower = BandTicks.floorToSpacing(BandTicks.tickFromHuman(pLow), SPACING);
-        rangeUpper = BandTicks.floorToSpacing(BandTicks.tickFromHuman(pHigh), SPACING);
-        (buyLower, buyUpper, sellLower, sellUpper) =
-            BandTicks.bandsFromTicks(rangeLower, rangeUpper, EDGE_BPS, SPACING);
+        (buyLower, buyUpper, sellLower, sellUpper, initSqrt) =
+            BandTicks.bandsFromRange(pLow, pHigh, EDGE_BPS, SPACING);
 
         endsKey = PoolKey({
             currency0: currency0,
@@ -90,33 +87,61 @@ abstract contract EndToEndBase is Test {
             tickSpacing: SPACING,
             hooks: IHooks(hookAddr)
         });
-        // Anyone may initialize; first caller sets price.
-        manager.initialize(endsKey, BandTicks.sqrtPriceFromHuman(pInit));
+
+        // configure BEFORE initialize — init price is forced to pLow*(1+edge)
         hook.configureRange(endsKey, pLow, pHigh, EDGE_BPS);
+        manager.initialize(endsKey, initSqrt);
     }
 
-    function _addUserRange(uint128 liquidity) internal {
+    function _addBuyBand(uint128 liquidity) internal {
         modifyLiquidityRouter.modifyLiquidity(
             endsKey,
             ModifyLiquidityParams({
-                tickLower: rangeLower, tickUpper: rangeUpper, liquidityDelta: int256(uint256(liquidity)), salt: 0
+                tickLower: buyLower, tickUpper: buyUpper, liquidityDelta: int256(uint256(liquidity)), salt: bytes32("BUY")
             }),
             ""
         );
     }
 
-    function _rangeLiqForEth(uint256 ethIn) internal view returns (uint128) {
-        return BandTicks.liquidityForAmount0(
-            TickMath.getSqrtPriceAtTick(rangeLower), TickMath.getSqrtPriceAtTick(rangeUpper), ethIn
+    function _addSellBand(uint128 liquidity) internal {
+        modifyLiquidityRouter.modifyLiquidity(
+            endsKey,
+            ModifyLiquidityParams({
+                tickLower: sellLower, tickUpper: sellUpper, liquidityDelta: int256(uint256(liquidity)), salt: bytes32("SELL")
+            }),
+            ""
         );
     }
 
-    function _userPosLiq() internal view returns (uint128 liq) {
-        (liq,,) = manager.getPositionInfo(endsKey.toId(), address(modifyLiquidityRouter), rangeLower, rangeUpper, bytes32(0));
+    function _buyLiq(uint256 quoteIn) internal view returns (uint128) {
+        return BandTicks.liquidityForAmount1(
+            TickMath.getSqrtPriceAtTick(buyLower), TickMath.getSqrtPriceAtTick(buyUpper), quoteIn
+        );
+    }
+
+    function _sellLiq(uint256 ethIn) internal view returns (uint128) {
+        return BandTicks.liquidityForAmount0(
+            TickMath.getSqrtPriceAtTick(sellLower), TickMath.getSqrtPriceAtTick(sellUpper), ethIn
+        );
+    }
+
+    function _buyPosLiq() internal view returns (uint128 liq) {
+        (liq,,) =
+            manager.getPositionInfo(endsKey.toId(), address(modifyLiquidityRouter), buyLower, buyUpper, bytes32("BUY"));
+    }
+
+    function _sellPosLiq() internal view returns (uint128 liq) {
+        (liq,,) = manager.getPositionInfo(
+            endsKey.toId(), address(modifyLiquidityRouter), sellLower, sellUpper, bytes32("SELL")
+        );
     }
 
     function _slotTick() internal view returns (int24 tick) {
         (, tick,,) = manager.getSlot0(endsKey.toId());
+    }
+
+    function _slotSqrt() internal view returns (uint160 sqrtP) {
+        (sqrtP,,,) = manager.getSlot0(endsKey.toId());
     }
 
     function _swap(bool zeroForOne, int256 amountSpecified, uint160 limit) internal {

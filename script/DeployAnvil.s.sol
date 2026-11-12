@@ -26,11 +26,12 @@ contract EndsLimitHookAnvil is EndsLimitHook {
     function validateHookAddress(BaseHook) internal pure override {}
 }
 
-/// @notice Deploy PoolManager + EndsLimitHook; admin configureRange then sample user LP.
 contract DeployAnvil is Script {
     using PoolIdLibrary for PoolKey;
 
-    uint160 constant FLAGS = uint160(Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG);
+    uint160 constant FLAGS = uint160(
+        Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+    );
     uint16 constant EDGE_BPS = 200;
     int24 constant SPACING = 60;
 
@@ -60,20 +61,20 @@ contract DeployAnvil is Script {
         PoolKey memory key = PoolKey({
             currency0: c0, currency1: c1, fee: 3000, tickSpacing: SPACING, hooks: IHooks(hookAddr)
         });
-        manager.initialize(key, BandTicks.sqrtPriceFromHuman(3000));
+
+        (int24 bl, int24 bu, int24 sl, int24 su, uint160 initSqrt) =
+            BandTicks.bandsFromRange(2500, 3500, EDGE_BPS, SPACING);
+
         hook.configureRange(key, 2500, 3500, EDGE_BPS);
+        manager.initialize(key, initSqrt);
 
-        (int24 rangeLower, int24 rangeUpper,,,, int24 sellLower, int24 sellUpper, bool configured) =
-            hook.bands(key.toId());
-        require(configured, "range not configured");
-
-        uint128 liquidity = BandTicks.liquidityForAmount0(
-            TickMath.getSqrtPriceAtTick(rangeLower), TickMath.getSqrtPriceAtTick(rangeUpper), 5 ether
+        uint128 buyLiq = BandTicks.liquidityForAmount1(
+            TickMath.getSqrtPriceAtTick(bl), TickMath.getSqrtPriceAtTick(bu), 50_000 ether
         );
         liq.modifyLiquidity(
             key,
             ModifyLiquidityParams({
-                tickLower: rangeLower, tickUpper: rangeUpper, liquidityDelta: int256(uint256(liquidity)), salt: 0
+                tickLower: bl, tickUpper: bu, liquidityDelta: int256(uint256(buyLiq)), salt: bytes32("BUY")
             }),
             ""
         );
@@ -82,9 +83,10 @@ contract DeployAnvil is Script {
 
         console2.log("PoolManager", address(manager));
         console2.log("EndsLimitHook", hookAddr);
-        console2.log("rangeLower", int256(rangeLower));
-        console2.log("rangeUpper", int256(rangeUpper));
-        console2.log("sellLower", int256(sellLower));
-        console2.log("sellUpper", int256(sellUpper));
+        console2.log("initSqrt", uint256(initSqrt));
+        console2.log("buyLower", int256(bl));
+        console2.log("buyUpper", int256(bu));
+        console2.log("sellLower", int256(sl));
+        console2.log("sellUpper", int256(su));
     }
 }

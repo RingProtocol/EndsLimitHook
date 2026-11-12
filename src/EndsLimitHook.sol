@@ -9,31 +9,29 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 
 /// @title EndsLimitHook
-/// @notice Admin configures one locked range per pool. Users may add LP only on that range.
-///         `beforeSwap` allows open-ended end zones; middle reverts. Hook never places LP itself.
+/// @notice Admin locks one range per pool. Init price is forced to `pLow*(1+edge)` (buy/middle boundary).
+///         Users add LP only on buy or sell end bands. Swaps are allowed in both directions everywhere:
+///         empty middle makes crossing cheap; reverse-fill risk is bounded by edge width (no afterSwap remove).
+///         Hook never places LP itself.
 /// @dev Assumes token0 = asset, token1 = quote, human price = token1/token0.
 contract EndsLimitHook is BaseHook {
     using PoolIdLibrary for PoolKey;
-    using StateLibrary for IPoolManager;
     using BeforeSwapDeltaLibrary for BeforeSwapDelta;
 
     error NotOwner();
     error NotConfigured();
     error AlreadyConfigured();
     error RangeLocked();
-    error SwapNotSupported();
-    error WrongDirection();
+    error BadInitPrice();
 
     event RangeConfigured(
         PoolId indexed id,
         uint256 pLow,
         uint256 pHigh,
         uint16 edgeBps,
-        int24 rangeLower,
-        int24 rangeUpper,
+        uint160 initSqrtPriceX96,
         int24 buyLower,
         int24 buyUpper,
         int24 sellLower,
@@ -41,8 +39,7 @@ contract EndsLimitHook is BaseHook {
     );
 
     struct BandState {
-        int24 rangeLower;
-        int24 rangeUpper;
+        uint160 initSqrtPriceX96;
         uint16 edgeBps;
         int24 buyLower;
         int24 buyUpper;
@@ -65,7 +62,7 @@ contract EndsLimitHook is BaseHook {
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
-            beforeInitialize: false,
+            beforeInitialize: true,
             afterInitialize: false,
             beforeAddLiquidity: true,
             afterAddLiquidity: false,
@@ -82,22 +79,17 @@ contract EndsLimitHook is BaseHook {
         });
     }
 
-    /// @notice Admin locks pool strategy range. `edgeBps` max 2%; width must be ≥ 5%.
+    /// @notice Admin locks range. Must run **before** pool `initialize`.
+    /// `edgeBps` max 2%; width ≥ 5%. Init price locked to `pLow*(1+edge)`.
     function configureRange(PoolKey calldata key, uint256 pLow, uint256 pHigh, uint16 edgeBps) external onlyOwner {
         PoolId id = key.toId();
         BandState storage s = bands[id];
         if (s.configured) revert AlreadyConfigured();
 
-        BandTicks.assertMinWidth(pLow, pHigh);
-        BandTicks.assertEdge(edgeBps);
+        (int24 buyLower, int24 buyUpper, int24 sellLower, int24 sellUpper, uint160 initSqrt) =
+            BandTicks.bandsFromRange(pLow, pHigh, edgeBps, key.tickSpacing);
 
-        int24 rangeLower = BandTicks.floorToSpacing(BandTicks.tickFromHuman(pLow), key.tickSpacing);
-        int24 rangeUpper = BandTicks.floorToSpacing(BandTicks.tickFromHuman(pHigh), key.tickSpacing);
-        (int24 buyLower, int24 buyUpper, int24 sellLower, int24 sellUpper) =
-            BandTicks.bandsFromTicks(rangeLower, rangeUpper, edgeBps, key.tickSpacing);
-
-        s.rangeLower = rangeLower;
-        s.rangeUpper = rangeUpper;
+        s.initSqrtPriceX96 = initSqrt;
         s.edgeBps = edgeBps;
         s.buyLower = buyLower;
         s.buyUpper = buyUpper;
@@ -105,7 +97,19 @@ contract EndsLimitHook is BaseHook {
         s.sellUpper = sellUpper;
         s.configured = true;
 
-        emit RangeConfigured(id, pLow, pHigh, edgeBps, rangeLower, rangeUpper, buyLower, buyUpper, sellLower, sellUpper);
+        emit RangeConfigured(id, pLow, pHigh, edgeBps, initSqrt, buyLower, buyUpper, sellLower, sellUpper);
+    }
+
+    function _beforeInitialize(address, PoolKey calldata key, uint160 sqrtPriceX96)
+        internal
+        view
+        override
+        returns (bytes4)
+    {
+        BandState storage s = bands[key.toId()];
+        if (!s.configured) revert NotConfigured();
+        if (sqrtPriceX96 != s.initSqrtPriceX96) revert BadInitPrice();
+        return this.beforeInitialize.selector;
     }
 
     function _beforeAddLiquidity(
@@ -116,33 +120,23 @@ contract EndsLimitHook is BaseHook {
     ) internal view override returns (bytes4) {
         BandState storage s = bands[key.toId()];
         if (!s.configured) revert NotConfigured();
-        if (params.tickLower != s.rangeLower || params.tickUpper != s.rangeUpper) revert RangeLocked();
+
+        bool buyBand = params.tickLower == s.buyLower && params.tickUpper == s.buyUpper;
+        bool sellBand = params.tickLower == s.sellLower && params.tickUpper == s.sellUpper;
+        if (!buyBand && !sellBand) revert RangeLocked();
+
         return this.beforeAddLiquidity.selector;
     }
 
-    function _beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
+    function _beforeSwap(address, PoolKey calldata key, SwapParams calldata, bytes calldata)
         internal
         view
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        BandState storage s = bands[key.toId()];
-        if (!s.configured) revert NotConfigured();
-
-        (, int24 tick,,) = poolManager.getSlot0(key.toId());
-
-        // Below range low (open-ended): traders sell asset → LP buys.
-        if (tick < s.buyUpper) {
-            if (!params.zeroForOne) revert WrongDirection();
-            return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
-
-        // At/above sell edge (open-ended up): traders buy asset → LP sells.
-        if (tick >= s.sellLower) {
-            if (params.zeroForOne) revert WrongDirection();
-            return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
-
-        revert SwapNotSupported();
+        // Directional gates at ends were removed: one-way rules re-deadlock after a partial fill.
+        // Geometry does the work — ends-only LP + empty middle; reverse fill ≤ edge width.
+        if (!bands[key.toId()].configured) revert NotConfigured();
+        return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 }

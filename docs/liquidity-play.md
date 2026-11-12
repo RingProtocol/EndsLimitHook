@@ -1,27 +1,42 @@
-# EndsLimitHook 流动性玩法（管理员锁定 range）
+# EndsLimitHook 玩法
 
-每个池由管理员配置一套 range（如 ETH/USDT `[2500, 3500]`）。同池所有 LP 必须使用该 ticks；不同交易对是不同池。
+## 统一说法
 
-## 规则摘要
+- **低区**：用户**卖 ETH**；池子（LP）**买 ETH**（付出 USDT）
+- **高区**：用户**买 ETH**；池子（LP）**卖 ETH**（收入 USDT）
+- 下文「买带 / 卖带」都按 **LP 视角**命名
 
-| 项 | 行为 |
+## 为什么不是中点开池
+
+中点开池若再拒中间单 ⇒ 价格冻死。  
+init 钉在 **`pLow×(1+edge)`**（如 2500→**2550**）：买带上沿，买带 LP ≈ **100% USDT**，等着在低区收用户卖来的 ETH。
+
+## 区间（例 edge=2%）
+
+| 区 | 价格 | 谁对谁 | LP 带 |
+|---|---|---|---|
+| 低区（LP 买 ETH） | 穿过 `[2500, 2550]` 往下 | 用户卖 ETH → LP 买 ETH | `[2500, 2550]` |
+| 中间 | `(2550, 3430)` | 可穿价，无策略 LP | 禁止加仓 |
+| 高区（LP 卖 ETH） | 穿过 `[3430, 3500]` 往上 | 用户买 ETH → LP 卖 ETH | `[3430, 3500]` |
+
+## USDT 换完之后，价格停在哪？
+
+买带是集中流动性 `[2500, 2550]`：
+
+| 现价 | 该仓位资产 |
 |---|---|
-| 配置 | 仅管理员 `configureRange`；edge ≤2%；宽度 ≥5%；每池一次 |
-| 初始价 | 第一个 `initialize` 的人 |
-| 加仓 | 任何人；ticks 必须等于锁定 range |
-| swap | 任何人；中间拒单；两端开门外按方向放行 |
+| **≥ 2550**（刚 init） | ≈ **100% USDT**，0 ETH |
+| 在 (2500, 2550) 内 | USDT + ETH 混合（部分成交） |
+| **≤ 2500**（带下沿及以下） | ≈ **100% ETH**，USDT ≈ 0（仅粉尘舍入） |
 
-```mermaid
-sequenceDiagram
-  participant Admin
-  participant User
-  participant Hook as EndsLimitHook
-  participant Pool as PoolManager
+所以：用户不断在低区卖 ETH，把买带里的 USDT 吃光后，价格会停在（或略低于）**下沿 ≈ 2500**，**不是 2550**。  
+2550 是「全是 USDT、还没开始买」的起点；2500 才是「USDT 换完、全是 ETH」的终点。
 
-  Note over Pool: anyone initialize (sets price)
-  Admin->>Hook: configureRange 2500-3500 edge<=2pct
-  User->>Pool: addLiquidity locked ticks only
-  Pool->>Hook: beforeAddLiquidity allow/reject
-  User->>Pool: swap
-  Pool->>Hook: beforeSwap gate
-```
+带下若没有别的 LP，再往下卖会因无流动性而难成交（或穿到其他池外流动性，本 hook 策略带内已空）。
+
+## 生命周期
+
+1. 管理员 `configureRange`（先）
+2. `initialize`（强制 init ≈ 2550）
+3. 用户/LP 加买带（USDT）和/或卖带（ETH）
+4. 低区收 ETH →（可选）撤出转到卖带 → 高区出 ETH
